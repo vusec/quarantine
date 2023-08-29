@@ -1,0 +1,950 @@
+diff --git a/arch/x86/kernel/cpu/resctrl/core.c b/arch/x86/kernel/cpu/resctrl/core.c
+index bb1c3f5f6..a5c51a14f 100644
+--- a/arch/x86/kernel/cpu/resctrl/core.c
++++ b/arch/x86/kernel/cpu/resctrl/core.c
+@@ -66,9 +66,6 @@ struct rdt_hw_resource rdt_resources_all[] = {
+ 			.rid			= RDT_RESOURCE_L3,
+ 			.name			= "L3",
+ 			.cache_level		= 3,
+-			.cache = {
+-				.min_cbm_bits	= 1,
+-			},
+ 			.domains		= domain_init(RDT_RESOURCE_L3),
+ 			.parse_ctrlval		= parse_cbm,
+ 			.format_str		= "%d=%0*x",
+@@ -83,9 +80,6 @@ struct rdt_hw_resource rdt_resources_all[] = {
+ 			.rid			= RDT_RESOURCE_L2,
+ 			.name			= "L2",
+ 			.cache_level		= 2,
+-			.cache = {
+-				.min_cbm_bits	= 1,
+-			},
+ 			.domains		= domain_init(RDT_RESOURCE_L2),
+ 			.parse_ctrlval		= parse_cbm,
+ 			.format_str		= "%d=%0*x",
+@@ -877,6 +871,7 @@ static __init void rdt_init_res_defs_intel(void)
+ 			r->cache.arch_has_sparse_bitmaps = false;
+ 			r->cache.arch_has_empty_bitmaps = false;
+ 			r->cache.arch_has_per_cpu_cfg = false;
++			r->cache.min_cbm_bits = 1;
+ 		} else if (r->rid == RDT_RESOURCE_MBA) {
+ 			hw_res->msr_base = MSR_IA32_MBA_THRTL_BASE;
+ 			hw_res->msr_update = mba_wrmsr_intel;
+@@ -897,6 +892,7 @@ static __init void rdt_init_res_defs_amd(void)
+ 			r->cache.arch_has_sparse_bitmaps = true;
+ 			r->cache.arch_has_empty_bitmaps = true;
+ 			r->cache.arch_has_per_cpu_cfg = true;
++			r->cache.min_cbm_bits = 0;
+ 		} else if (r->rid == RDT_RESOURCE_MBA) {
+ 			hw_res->msr_base = MSR_IA32_MBA_BW_BASE;
+ 			hw_res->msr_update = mba_wrmsr_amd;
+diff --git a/arch/x86/kernel/fpu/core.c b/arch/x86/kernel/fpu/core.c
+index 7ada7bd03..1cf951fbc 100644
+--- a/arch/x86/kernel/fpu/core.c
++++ b/arch/x86/kernel/fpu/core.c
+@@ -419,6 +419,36 @@ void switch_fpu_return(void)
+ }
+ EXPORT_SYMBOL_GPL(switch_fpu_return);
+ 
++/*
++ * Load FPU context of the given task -- cf. switch_fpu_return
++ */
++void hypiso_switch_fpu_return(struct task_struct *task)
++{
++	struct fpu *fpu;
++	int cpu;
++
++	if (!static_cpu_has(X86_FEATURE_FPU))
++		return;
++
++	fpu = &task->thread.fpu;
++	cpu = smp_processor_id();
++
++	if (WARN_ON_ONCE(task->flags & PF_KTHREAD))
++		return;
++
++	if (!fpregs_state_valid(fpu, cpu)) {
++		u64 mask;
++
++		mask = xfeatures_mask_restore_user() |
++			xfeatures_mask_supervisor();
++		__restore_fpregs_from_fpstate(&fpu->state, mask);
++
++		fpregs_activate(fpu);
++		fpu->last_cpu = cpu;
++	}
++	clear_ti_thread_flag(task_thread_info(task), TIF_NEED_FPU_LOAD);
++}
++
+ #ifdef CONFIG_X86_DEBUG_FPU
+ /*
+  * If current FPU state according to its tracking (loaded FPU context on this
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index bfe0de300..791984fc7 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -59,6 +59,7 @@
+ #include <linux/mem_encrypt.h>
+ #include <linux/entry-kvm.h>
+ #include <linux/suspend.h>
++#include <linux/hypiso.h>
+ 
+ #include <trace/events/kvm.h>
+ 
+@@ -3198,6 +3199,10 @@ static void record_steal_time(struct kvm_vcpu *vcpu)
+ 	struct kvm_host_map map;
+ 	struct kvm_steal_time *st;
+ 
++#ifdef CONFIG_HYPISO
++	return;
++#endif
++
+ 	if (kvm_xen_msr_enabled(vcpu->kvm)) {
+ 		kvm_xen_runstate_set_running(vcpu);
+ 		return;
+@@ -8860,7 +8865,7 @@ static void kvm_inject_exception(struct kvm_vcpu *vcpu)
+ 	static_call(kvm_x86_queue_exception)(vcpu);
+ }
+ 
+-static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
++static int inject_pending_event(struct kvm_vcpu *vcpu)
+ {
+ 	int r;
+ 	bool can_inject = true;
+@@ -8994,14 +8999,14 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
+ 	if (is_guest_mode(vcpu) &&
+ 	    kvm_x86_ops.nested_ops->hv_timer_pending &&
+ 	    kvm_x86_ops.nested_ops->hv_timer_pending(vcpu))
+-		*req_immediate_exit = true;
++		vcpu->req_immediate_exit = true;
+ 
+ 	WARN_ON(vcpu->arch.exception.pending);
+ 	return 0;
+ 
+ out:
+ 	if (r == -EBUSY) {
+-		*req_immediate_exit = true;
++		vcpu->req_immediate_exit = true;
+ 		r = 0;
+ 	}
+ 	return r;
+@@ -9417,6 +9422,22 @@ void __kvm_request_immediate_exit(struct kvm_vcpu *vcpu)
+ }
+ EXPORT_SYMBOL_GPL(__kvm_request_immediate_exit);
+ 
++#ifdef CONFIG_HYPISO
++void hypiso_fpu_restore(struct kvm_vcpu *vcpu)
++{
++	if (test_ti_thread_flag(task_thread_info(vcpu->owner), TIF_NEED_FPU_LOAD)) {
++		hypiso_switch_fpu_return(vcpu->owner);
++	}
++}
++#else /* CONFIG_HYPISO */
++void hypiso_fpu_restore(struct kvm_vcpu *vcpu)
++{
++	fpregs_assert_state_consistent();
++	if (test_thread_flag(TIF_NEED_FPU_LOAD))
++		switch_fpu_return();
++}
++#endif /* CONFIG_HYPISO */
++
+ /*
+  * Returns 1 to let vcpu_run() continue the guest execution loop without
+  * exiting to the userspace.  Otherwise, the value will be returned to the
+@@ -9428,9 +9449,10 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	bool req_int_win =
+ 		dm_request_for_irq_injection(vcpu) &&
+ 		kvm_cpu_accept_dm_intr(vcpu);
+-	fastpath_t exit_fastpath;
+ 
+-	bool req_immediate_exit = false;
++	vcpu->req_immediate_exit = false;
++	vcpu->vmrun_abort = VMRUN_ABORT_NONE;
++	vcpu->exit_fastpath = EXIT_FASTPATH_NONE;
+ 
+ 	/* Forbid vmenter if vcpu dirty ring is soft-full */
+ 	if (unlikely(vcpu->kvm->dirty_ring_size &&
+@@ -9454,17 +9476,8 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 		}
+ 		if (kvm_check_request(KVM_REQ_MMU_RELOAD, vcpu))
+ 			kvm_mmu_unload(vcpu);
+-		if (kvm_check_request(KVM_REQ_MIGRATE_TIMER, vcpu))
+-			__kvm_migrate_timers(vcpu);
+ 		if (kvm_check_request(KVM_REQ_MASTERCLOCK_UPDATE, vcpu))
+ 			kvm_gen_update_masterclock(vcpu->kvm);
+-		if (kvm_check_request(KVM_REQ_GLOBAL_CLOCK_UPDATE, vcpu))
+-			kvm_gen_kvmclock_update(vcpu);
+-		if (kvm_check_request(KVM_REQ_CLOCK_UPDATE, vcpu)) {
+-			r = kvm_guest_time_update(vcpu);
+-			if (unlikely(r))
+-				goto out;
+-		}
+ 		if (kvm_check_request(KVM_REQ_MMU_SYNC, vcpu))
+ 			kvm_mmu_sync_roots(vcpu);
+ 		if (kvm_check_request(KVM_REQ_LOAD_MMU_PGD, vcpu))
+@@ -9501,8 +9514,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 			r = 1;
+ 			goto out;
+ 		}
+-		if (kvm_check_request(KVM_REQ_STEAL_UPDATE, vcpu))
+-			record_steal_time(vcpu);
+ 		if (kvm_check_request(KVM_REQ_SMI, vcpu))
+ 			process_smi(vcpu);
+ 		if (kvm_check_request(KVM_REQ_NMI, vcpu))
+@@ -9580,7 +9591,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 			goto out;
+ 		}
+ 
+-		r = inject_pending_event(vcpu, &req_immediate_exit);
++		r = inject_pending_event(vcpu);
+ 		if (r < 0) {
+ 			r = 0;
+ 			goto out;
+@@ -9599,6 +9610,74 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 		goto cancel_injection;
+ 	}
+ 
++	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
++	smp_mb__after_srcu_read_unlock();
++
++	hypiso_host_vmrun(vcpu);
++
++	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
++
++	if (vcpu->vmrun_abort == VMRUN_ABORT_OUT) {
++		r = 1;
++		goto out;
++	}
++	if (vcpu->vmrun_abort == VMRUN_ABORT_CANCEL_INJECTION) {
++		r = 1;
++		goto cancel_injection;
++	}
++
++	/*
++	 * Profile KVM exit RIPs:
++	 */
++	if (unlikely(prof_on == KVM_PROFILING)) {
++		unsigned long rip = kvm_rip_read(vcpu);
++		profile_hit(KVM_PROFILING, (void *)rip);
++	}
++
++	if (unlikely(vcpu->arch.tsc_always_catchup))
++		kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
++
++	if (vcpu->arch.apic_attention)
++		kvm_lapic_sync_from_vapic(vcpu);
++
++	r = static_call(kvm_x86_handle_exit)(vcpu, vcpu->exit_fastpath);
++	return r;
++
++cancel_injection:
++	if (vcpu->req_immediate_exit)
++		kvm_make_request(KVM_REQ_EVENT, vcpu);
++	static_call(kvm_x86_cancel_injection)(vcpu);
++	if (unlikely(vcpu->arch.apic_attention))
++		kvm_lapic_sync_from_vapic(vcpu);
++out:
++	return r;
++}
++
++/*
++ * This code was originally part of vcpu_enter_guest, but we cut it out in order
++ * to run it isolated on a guest core.
++ */
++void hypiso_vcpu_run(struct kvm_vcpu *vcpu)
++{
++	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
++
++	if (kvm_request_pending(vcpu)) {
++		if (kvm_check_request(KVM_REQ_MIGRATE_TIMER, vcpu))
++			__kvm_migrate_timers(vcpu);
++		if (kvm_check_request(KVM_REQ_GLOBAL_CLOCK_UPDATE, vcpu))
++			kvm_gen_kvmclock_update(vcpu);
++		if (kvm_check_request(KVM_REQ_CLOCK_UPDATE, vcpu)) {
++			if (unlikely(kvm_guest_time_update(vcpu))) {
++				vcpu->vmrun_abort = VMRUN_ABORT_OUT;
++				srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
++				smp_mb__after_srcu_read_unlock();
++				return;
++			}
++		}
++		if (kvm_check_request(KVM_REQ_STEAL_UPDATE, vcpu))
++			record_steal_time(vcpu);
++	}
++
+ 	preempt_disable();
+ 
+ 	static_call(kvm_x86_prepare_guest_switch)(vcpu);
+@@ -9639,19 +9718,16 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 		smp_wmb();
+ 		local_irq_enable();
+ 		preempt_enable();
+-		vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
+-		r = 1;
+-		goto cancel_injection;
++		vcpu->vmrun_abort = VMRUN_ABORT_CANCEL_INJECTION;
++		return;
+ 	}
+ 
+-	if (req_immediate_exit) {
++	if (vcpu->req_immediate_exit) {
+ 		kvm_make_request(KVM_REQ_EVENT, vcpu);
+ 		static_call(kvm_x86_request_immediate_exit)(vcpu);
+ 	}
+ 
+-	fpregs_assert_state_consistent();
+-	if (test_thread_flag(TIF_NEED_FPU_LOAD))
+-		switch_fpu_return();
++	hypiso_fpu_restore(vcpu);
+ 
+ 	if (unlikely(vcpu->arch.switch_db_regs)) {
+ 		set_debugreg(0, 7);
+@@ -9664,15 +9740,15 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	}
+ 
+ 	for (;;) {
+-		exit_fastpath = static_call(kvm_x86_run)(vcpu);
+-		if (likely(exit_fastpath != EXIT_FASTPATH_REENTER_GUEST))
++		vcpu->exit_fastpath = static_call(kvm_x86_run)(vcpu);
++		if (likely(vcpu->exit_fastpath != EXIT_FASTPATH_REENTER_GUEST))
+ 			break;
+ 
+ 		if (vcpu->arch.apicv_active)
+ 			static_call(kvm_x86_sync_pir_to_irr)(vcpu);
+ 
+ 		if (unlikely(kvm_vcpu_exit_request(vcpu))) {
+-			exit_fastpath = EXIT_FASTPATH_EXIT_HANDLED;
++			vcpu->exit_fastpath = EXIT_FASTPATH_EXIT_HANDLED;
+ 			break;
+ 		}
+ 	}
+@@ -9740,34 +9816,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 
+ 	local_irq_enable();
+ 	preempt_enable();
+-
+-	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
+-
+-	/*
+-	 * Profile KVM exit RIPs:
+-	 */
+-	if (unlikely(prof_on == KVM_PROFILING)) {
+-		unsigned long rip = kvm_rip_read(vcpu);
+-		profile_hit(KVM_PROFILING, (void *)rip);
+-	}
+-
+-	if (unlikely(vcpu->arch.tsc_always_catchup))
+-		kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
+-
+-	if (vcpu->arch.apic_attention)
+-		kvm_lapic_sync_from_vapic(vcpu);
+-
+-	r = static_call(kvm_x86_handle_exit)(vcpu, exit_fastpath);
+-	return r;
+-
+-cancel_injection:
+-	if (req_immediate_exit)
+-		kvm_make_request(KVM_REQ_EVENT, vcpu);
+-	static_call(kvm_x86_cancel_injection)(vcpu);
+-	if (unlikely(vcpu->arch.apic_attention))
+-		kvm_lapic_sync_from_vapic(vcpu);
+-out:
+-	return r;
+ }
+ 
+ static inline int vcpu_block(struct kvm *kvm, struct kvm_vcpu *vcpu)
+diff --git a/include/linux/entry-kvm.h b/include/linux/entry-kvm.h
+index 0d7865a07..c45398866 100644
+--- a/include/linux/entry-kvm.h
++++ b/include/linux/entry-kvm.h
+@@ -17,8 +17,7 @@
+ #endif
+ 
+ #define XFER_TO_GUEST_MODE_WORK						\
+-	(_TIF_NEED_RESCHED | _TIF_SIGPENDING | _TIF_NOTIFY_SIGNAL |	\
+-	 _TIF_NOTIFY_RESUME | ARCH_XFER_TO_GUEST_MODE_WORK)
++	(_TIF_SIGPENDING | _TIF_NOTIFY_SIGNAL | ARCH_XFER_TO_GUEST_MODE_WORK)
+ 
+ struct kvm_vcpu;
+ 
+diff --git a/include/linux/hypiso.h b/include/linux/hypiso.h
+new file mode 100644
+index 000000000..72e878461
+--- /dev/null
++++ b/include/linux/hypiso.h
+@@ -0,0 +1,18 @@
++#ifndef __HYPISO_H__
++#define __HYPISO_H__
++
++struct kvm_vcpu;
++void hypiso_vcpu_run(struct kvm_vcpu *vcpu);
++void hypiso_switch_fpu_return(struct task_struct *task);
++
++#ifdef CONFIG_HYPISO
++void hypiso_host_vmrun(struct kvm_vcpu *vcpu);
++void hypiso_init(void);
++void hypiso_init_vcpu(struct kvm_vcpu *vcpu);
++#else /* CONFIG_HYPISO */
++static inline void hypiso_host_vmrun(struct kvm_vcpu *vcpu) { hypiso_vcpu_run(vcpu); }
++static inline void hypiso_init(void) { }
++static inline void hypiso_init_vcpu(struct kvm_vcpu *vcpu) { }
++#endif /* CONFIG_HYPISO */
++
++#endif /* __HYPISO_H__ */
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 0f18df7fe..47db5b23d 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -30,6 +30,7 @@
+ #include <linux/nospec.h>
+ #include <linux/notifier.h>
+ #include <asm/signal.h>
++#include <linux/hypiso.h>
+ 
+ #include <linux/kvm.h>
+ #include <linux/kvm_para.h>
+@@ -361,8 +362,25 @@ struct kvm_vcpu {
+ 	 * it is a valid slot.
+ 	 */
+ 	int last_used_slot;
++
++	bool req_immediate_exit;
++	int vmrun_abort;
++	fastpath_t exit_fastpath;
++
++#ifdef CONFIG_HYPISO
++	struct task_struct *owner;
++	struct task_struct *runner;
++	struct list_head node; /* node in the VM-run and VM-exit queues */
++	bool vmrunnable;
++	bool vmexit_pending;
++	struct completion runner_activated;
++#endif
+ };
+ 
++#define VMRUN_ABORT_NONE		0
++#define VMRUN_ABORT_OUT			1
++#define VMRUN_ABORT_CANCEL_INJECTION	2
++
+ /* must be called with irqs disabled */
+ static __always_inline void guest_enter_irqoff(void)
+ {
+diff --git a/init/main.c b/init/main.c
+index 3c4054a95..a2eeb2615 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -100,6 +100,7 @@
+ #include <linux/kcsan.h>
+ #include <linux/init_syscalls.h>
+ #include <linux/stackdepot.h>
++#include <linux/hypiso.h>
+ 
+ #include <asm/io.h>
+ #include <asm/bugs.h>
+@@ -1513,6 +1514,8 @@ static int __ref kernel_init(void *unused)
+ 	free_initmem();
+ 	mark_readonly();
+ 
++	hypiso_init();
++
+ 	/*
+ 	 * Kernel mappings are now finalized - update the userspace page-table
+ 	 * to finalize PTI.
+diff --git a/security/Kconfig b/security/Kconfig
+index 0ced7fd33..2893ec77b 100644
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -5,6 +5,12 @@
+ 
+ menu "Security options"
+ 
++config HYPISO
++       bool "Hypervisor Isolation"
++       default y
++       help
++         Isolate the hypervisor from VMs on seperate physical cores.
++
+ source "security/keys/Kconfig"
+ 
+ config SECURITY_DMESG_RESTRICT
+diff --git a/security/Makefile b/security/Makefile
+index 18121f8f8..2438d9b20 100644
+--- a/security/Makefile
++++ b/security/Makefile
+@@ -27,3 +27,5 @@ obj-$(CONFIG_SECURITY_LANDLOCK)		+= landlock/
+ 
+ # Object integrity file lists
+ obj-$(CONFIG_INTEGRITY)			+= integrity/
++
++obj-$(CONFIG_HYPISO)			+= hypiso/
+diff --git a/security/hypiso/Makefile b/security/hypiso/Makefile
+new file mode 100644
+index 000000000..8caa45004
+--- /dev/null
++++ b/security/hypiso/Makefile
+@@ -0,0 +1 @@
++obj-$(CONFIG_HYPISO) += init.o isolate.o host.o guest.o sysfs.o
+diff --git a/security/hypiso/guest.c b/security/hypiso/guest.c
+new file mode 100644
+index 000000000..5b9800c0c
+--- /dev/null
++++ b/security/hypiso/guest.c
+@@ -0,0 +1,39 @@
++#include <linux/kthread.h>
++#include <linux/delay.h>
++#include <linux/stddef.h>
++#include <linux/hypiso.h>
++#include <asm/mmu_context.h>
++#include <asm-generic/mmu_context.h>
++#include "internal.h"
++
++static void hypiso_guest_vmrun(struct kvm_vcpu *vcpu)
++{
++	vcpu_load(vcpu);
++	hypiso_vcpu_run(vcpu);
++	vcpu_put(vcpu);
++
++	vcpu->vmrunnable = false;
++	smp_wmb();
++	smp_store_release(&vcpu->vmexit_pending, true);
++}
++
++/*
++ * Kernel thread running on guest cores responsible for running a specific vCPU.
++ */
++int hypiso_runner(void *data)
++{
++	struct kvm_vcpu *vcpu = data;
++
++	printk("HYPISO: spawned %s/%d:%d@%px\n", current->comm,
++		smp_processor_id(), current->pid, current);
++
++	for (;;) {
++		if (!hypiso_on)
++			wait_for_completion(&vcpu->runner_activated);
++		if (smp_load_acquire(&vcpu->vmrunnable))
++			hypiso_guest_vmrun(vcpu);
++		schedule();
++	}
++
++	return 0;
++}
+diff --git a/security/hypiso/host.c b/security/hypiso/host.c
+new file mode 100644
+index 000000000..62b0a1bc3
+--- /dev/null
++++ b/security/hypiso/host.c
+@@ -0,0 +1,29 @@
++#include <linux/kthread.h>
++#include <linux/delay.h>
++#include <linux/stddef.h>
++#include <linux/hypiso.h>
++#include "internal.h"
++
++static void hypiso_sleep_until_vmexit(struct kvm_vcpu *vcpu)
++{
++	for (;;) {
++		if (smp_load_acquire(&vcpu->vmexit_pending))
++			break;
++		schedule();
++	}
++}
++
++void hypiso_host_vmrun(struct kvm_vcpu *vcpu)
++{
++	if (!hypiso_on) {
++		hypiso_vcpu_run(vcpu);
++		return;
++	}
++
++	vcpu_put(vcpu);
++	vcpu->vmexit_pending = false;
++	smp_wmb();
++	smp_store_release(&vcpu->vmrunnable, true);
++	hypiso_sleep_until_vmexit(vcpu);
++	vcpu_load(vcpu);
++}
+diff --git a/security/hypiso/init.c b/security/hypiso/init.c
+new file mode 100644
+index 000000000..2d1b75140
+--- /dev/null
++++ b/security/hypiso/init.c
+@@ -0,0 +1,118 @@
++#include <linux/topology.h>
++#include <linux/slab.h>
++#include <linux/sched.h>
++#include <uapi/linux/sched/types.h>
++#include "internal.h"
++
++cpumask_var_t host_cpus;
++cpumask_var_t guest_cpus;
++
++int hypiso_on = 0;
++int hypiso_nr_host_cpus = 1;
++int hypiso_nr_guest_cpus = 1;
++
++u64 hypiso_nr_vcpus = 0;
++struct kvm_vcpu *hypiso_vcpus[MAX_NR_VCPUS];
++
++/*
++ * Set @target CPUs in @cpus using a small amount of cores, none of which have a
++ * CPU in @taken.
++ */
++static int hypiso_set_cores(cpumask_var_t cpus, int target, cpumask_var_t taken)
++{
++	int cpu, sibling;
++	struct cpumask forbidden;
++
++	/*
++	 * Mark all siblings of taken CPUs as forbidden.
++	 */
++	cpumask_clear(&forbidden);
++	for_each_cpu(cpu, taken)
++		cpumask_or(&forbidden, &forbidden, topology_sibling_cpumask(cpu));
++
++	for_each_cpu(cpu, cpu_online_mask) {
++		if (cpumask_test_cpu(cpu, &forbidden))
++			continue;
++		for_each_cpu(sibling, topology_sibling_cpumask(cpu)) {
++			if (cpumask_weight(cpus) >= target)
++				break;
++			cpumask_set_cpu(sibling, cpus);
++		}
++	}
++
++	if (cpumask_weight(cpus) != target)
++		printk("HYPISO: there are only %d cpus available\n", cpumask_weight(cpus));
++
++	return cpumask_weight(cpus);
++}
++
++static void hypiso_config_cores(void)
++{
++	cpumask_clear(host_cpus);
++	cpumask_clear(guest_cpus);
++	hypiso_nr_host_cpus = hypiso_set_cores(host_cpus, hypiso_nr_host_cpus, guest_cpus);
++	hypiso_nr_guest_cpus = hypiso_set_cores(guest_cpus, hypiso_nr_guest_cpus, host_cpus);
++}
++
++void hypiso_init(void)
++{
++	zalloc_cpumask_var(&host_cpus, GFP_KERNEL);
++	zalloc_cpumask_var(&guest_cpus, GFP_KERNEL);
++	hypiso_config_cores();
++	hypiso_init_sysfs();
++	if (hypiso_on)
++		hypiso_enable();
++}
++
++static struct task_struct *hypiso_spawn_runner(struct kvm_vcpu *vcpu)
++{
++	pid_t pid;
++	struct task_struct *runner;
++	char name[TASK_COMM_LEN];
++	unsigned int old_flags = current->flags;
++	unsigned long clone_flags = CLONE_FILES | CLONE_FS | CLONE_IO
++				| CLONE_SIGHAND | CLONE_THREAD | CLONE_VM;
++
++	current->flags |= PF_KTHREAD;
++	pid = kernel_thread(hypiso_runner, vcpu, clone_flags);
++	current->flags = old_flags;
++
++	sched_setaffinity(pid, guest_cpus);
++	runner = find_get_task_by_vpid(pid);
++
++	snprintf(name, sizeof(name), "runner-%llu", hypiso_nr_vcpus);
++	set_task_comm(runner, name);
++
++	printk("HYPISO: %s/%d:%d@%px is creating vcpu %llu\n", current->comm,
++		smp_processor_id(), current->pid, current, hypiso_nr_vcpus);
++
++	return runner;
++}
++
++void hypiso_init_vcpu(struct kvm_vcpu *vcpu)
++{
++	hypiso_vcpus[hypiso_nr_vcpus] = vcpu;
++	hypiso_nr_vcpus++;
++	BUG_ON(hypiso_nr_vcpus > MAX_NR_VCPUS);
++
++	get_task_struct(current);
++	vcpu->owner = current;
++	INIT_LIST_HEAD(&vcpu->node);
++	vcpu->vmrunnable = false;
++	vcpu->vmexit_pending = false;
++	init_completion(&vcpu->runner_activated);
++
++	vcpu->runner = hypiso_spawn_runner(vcpu);
++}
++
++void hypiso_set_nr_host_cpus(int new_nr_host_cpus)
++{
++	cpumask_clear(host_cpus);
++	hypiso_nr_host_cpus = hypiso_set_cores(host_cpus, new_nr_host_cpus, guest_cpus);
++}
++
++void hypiso_set_nr_guest_cpus(int new_nr_guest_cpus)
++{
++	cpumask_clear(guest_cpus);
++	hypiso_nr_guest_cpus = hypiso_set_cores(guest_cpus, new_nr_guest_cpus, host_cpus);
++}
+diff --git a/security/hypiso/internal.h b/security/hypiso/internal.h
+new file mode 100644
+index 000000000..23cd2cfa2
+--- /dev/null
++++ b/security/hypiso/internal.h
+@@ -0,0 +1,29 @@
++#include <linux/topology.h>
++#include <linux/slab.h>
++#include <linux/kvm_host.h>
++
++#ifndef __HYPISO_INTERNAL_H__
++#define __HYPISO_INTERNAL_H__
++
++#define MAX_NR_VCPUS 128
++extern cpumask_var_t host_cpus;
++extern cpumask_var_t guest_cpus;
++extern int hypiso_on;
++extern int hypiso_nr_host_cpus;
++extern int hypiso_nr_guest_cpus;
++extern u64 hypiso_nr_vcpus;
++extern struct kvm_vcpu *hypiso_vcpus[MAX_NR_VCPUS];
++void hypiso_set_nr_host_cpus(int new_nr_host_cpus);
++void hypiso_set_nr_guest_cpus(int new_nr_guest_cpus);
++
++void hypiso_enable(void);
++void hypiso_disable(void);
++
++void hypiso_host_cpu_init(int cpu);
++
++void hypiso_guest_cpu_init(int cpu);
++int hypiso_runner(void *data);
++
++void hypiso_init_sysfs(void);
++
++#endif /* __HYPISO_INTERNAL_H__ */
+diff --git a/security/hypiso/isolate.c b/security/hypiso/isolate.c
+new file mode 100644
+index 000000000..2c73d0f6d
+--- /dev/null
++++ b/security/hypiso/isolate.c
+@@ -0,0 +1,53 @@
++#include "internal.h"
++
++static void hypiso_isolate_processes(const struct cpumask *cpus)
++{
++	struct task_struct *task;
++
++	for_each_process(task) {
++		if (!(task->flags & PF_KTHREAD))
++			sched_setaffinity(task->pid, cpus);
++	}
++}
++
++static void hypiso_reroute_irqs(const struct cpumask *cpus)
++{
++	int irq;
++	for_each_active_irq(irq)
++		irq_set_affinity(irq, cpus);
++}
++
++static void hypiso_start_runners(void)
++{
++	int i;
++	struct kvm_vcpu *vcpu;
++
++	for (i = 0; i < hypiso_nr_vcpus; i++) {
++		vcpu = hypiso_vcpus[i];
++		sched_setaffinity(vcpu->runner->pid, guest_cpus);
++		complete(&vcpu->runner_activated);
++	}
++}
++
++static void hypiso_stop_runners(void)
++{
++	int i;
++	for (i = 0; i < hypiso_nr_vcpus; i++)
++		reinit_completion(&hypiso_vcpus[i]->runner_activated);
++}
++
++void hypiso_enable(void)
++{
++	hypiso_isolate_processes(host_cpus);
++	hypiso_reroute_irqs(host_cpus);
++	hypiso_start_runners();
++	hypiso_on = 1;
++}
++
++void hypiso_disable(void)
++{
++	hypiso_on = 0;
++	hypiso_stop_runners();
++	hypiso_reroute_irqs(cpu_online_mask);
++	hypiso_isolate_processes(cpu_online_mask);
++}
+diff --git a/security/hypiso/sysfs.c b/security/hypiso/sysfs.c
+new file mode 100644
+index 000000000..eccd50520
+--- /dev/null
++++ b/security/hypiso/sysfs.c
+@@ -0,0 +1,139 @@
++#include <linux/kobject.h>
++#include <linux/string.h>
++#include "internal.h"
++
++static ssize_t hypiso_sysfs_hypiso_on_store(struct kobject *kobj,
++					struct kobj_attribute *attr,
++					const char *buf, size_t count)
++{
++	if (*buf == '0')
++		hypiso_disable();
++	else if (*buf == '1')
++		hypiso_enable();
++
++	return count;
++}
++
++static ssize_t hypiso_sysfs_hypiso_on_show(struct kobject *kobj,
++					struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", hypiso_on);
++}
++
++static ssize_t hypiso_sysfs_nr_host_cpus_store(struct kobject *kobj,
++					struct kobj_attribute *attr,
++					const char *buf, size_t count)
++{
++	long nr;
++
++	if (kstrtol(buf, 0, &nr)) {
++		printk("HYPISO: parsing of '%s' as a number failed\n", buf);
++		return count;
++	}
++
++	if (nr < 1) {
++		printk("HYPISO: need at least 1 host cpu\n");
++		return count;
++	}
++
++	hypiso_set_nr_host_cpus(nr);
++
++	return count;
++}
++
++static ssize_t hypiso_sysfs_nr_host_cpus_show(struct kobject *kobj,
++					struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", hypiso_nr_host_cpus);
++}
++
++static ssize_t hypiso_sysfs_nr_guest_cpus_store(struct kobject *kobj,
++					struct kobj_attribute *attr,
++					const char *buf, size_t count)
++{
++	long nr;
++
++	if (kstrtol(buf, 0, &nr)) {
++		printk("HYPISO: parsing of '%s' as a number failed\n", buf);
++		return count;
++	}
++
++	if (nr < 1) {
++		printk("HYPISO: need at least 1 guest cpu\n");
++		return count;
++	}
++
++	hypiso_set_nr_guest_cpus(nr);
++
++	return count;
++}
++
++static ssize_t hypiso_sysfs_nr_guest_cpus_show(struct kobject *kobj,
++					struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", hypiso_nr_guest_cpus);
++}
++
++static ssize_t hypiso_sysfs_core_config_show(struct kobject *kobj,
++					struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "host_cpus  %*pbl\nguest_cpus %*pbl\n",
++		cpumask_pr_args(host_cpus), cpumask_pr_args(guest_cpus));
++}
++
++static struct kobj_attribute hypiso_sysfs_hypiso_on = {
++	.attr = {
++		.name = "hypiso_on",
++		.mode = S_IWUSR | S_IRUSR,
++	},
++	.store = hypiso_sysfs_hypiso_on_store,
++	.show = hypiso_sysfs_hypiso_on_show,
++};
++
++static struct kobj_attribute hypiso_sysfs_nr_host_cpus = {
++	.attr = {
++		.name = "nr_host_cpus",
++		.mode = S_IWUSR | S_IRUSR,
++	},
++	.store = hypiso_sysfs_nr_host_cpus_store,
++	.show = hypiso_sysfs_nr_host_cpus_show,
++};
++
++static struct kobj_attribute hypiso_sysfs_nr_guest_cpus = {
++	.attr = {
++		.name = "nr_guest_cpus",
++		.mode = S_IWUSR | S_IRUSR,
++	},
++	.store = hypiso_sysfs_nr_guest_cpus_store,
++	.show = hypiso_sysfs_nr_guest_cpus_show,
++};
++
++static struct kobj_attribute hypiso_sysfs_core_config = {
++	.attr = {
++		.name = "core_config",
++		.mode = S_IRUSR,
++	},
++	.show = hypiso_sysfs_core_config_show,
++};
++
++static struct attribute *hysiso_attrs[] = {
++	&hypiso_sysfs_hypiso_on.attr,
++	&hypiso_sysfs_nr_host_cpus.attr,
++	&hypiso_sysfs_nr_guest_cpus.attr,
++	&hypiso_sysfs_core_config.attr,
++	NULL,
++};
++
++static struct attribute_group hysiso_attr_group = {
++	.attrs = hysiso_attrs,
++};
++
++void hypiso_init_sysfs(void)
++{
++	int ret;
++	struct kobject *hysiso_kobj = kobject_create_and_add("hypiso", kernel_kobj);
++
++	ret = sysfs_create_group(hysiso_kobj, &hysiso_attr_group);
++	if (ret)
++		kobject_put(hysiso_kobj);
++}
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 7851f3a1b..d5200aaa4 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -56,6 +56,7 @@
+ #include <asm/processor.h>
+ #include <asm/ioctl.h>
+ #include <linux/uaccess.h>
++#include <linux/hypiso.h>
+ 
+ #include "coalesced_mmio.h"
+ #include "async_pf.h"
+@@ -3643,6 +3644,8 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, u32 id)
+ 	snprintf(vcpu->stats_id, sizeof(vcpu->stats_id), "kvm-%d/vcpu-%d",
+ 		 task_pid_nr(current), id);
+ 
++	hypiso_init_vcpu(vcpu);
++
+ 	/* Now it's all set up, let userspace reach it */
+ 	kvm_get_kvm(kvm);
+ 	r = create_vcpu_fd(vcpu);
