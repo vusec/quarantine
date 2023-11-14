@@ -1,11 +1,10 @@
 #!/bin/sh
 
-mkdir -p home
-sudo virtme-run \
+virtme-run \
     --name quarantine \
-    --kdir linux-5.15  \
-    --cwd home \
-    --rwdir home \
+    --kdir linux-5.15-quarantine-virt  \
+    --cwd virt_home \
+    --rwdir virt_home \
     --mods auto \
     --kopt "noibrs noibpb nopti nospectre_v2 nospectre_v1 l1tf=off" \
     --kopt "nospec_store_bypass_disable no_stf_barrier mds=off tsx=on" \

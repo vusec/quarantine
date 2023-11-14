@@ -31,7 +31,7 @@ git clone https://github.com/amluto/virtme.git
 cd virtme && sudo ./setup.py install && cd ..
 ```
 
-# Build The Prototype
+# Build the KVM Prototype
 
 Acquire the Linux 5.15 source code.
 ```
@@ -56,7 +56,7 @@ virtme-configkernel --defconfig
 ```
 Make sure Quarantine is enabled.
 ```
-scripts/config --enable SYSISO --enable HYPISO
+scripts/config --enable HYPISO
 ```
 
 Build the Quarantined kernel.
@@ -68,9 +68,40 @@ cd ..
 You can now install the kernel on your machine to run it baremetal. For testing,
 it is easier to run it virtualized, which we will discuss next.
 
-# Test the Kernel-based Prototype
+# Build the Kernel-Isolation Prototype
 
-TODO @Manuel
+***Note that you applying `quarantine-kern.patch` and `quarantine-virt.patch` at the same source tree is not supported***
+
+Acquire Linux 5.15 and `cd linux-5.15`
+
+Apply the patch
+`patch patch -p1 < ../quarantine-kern.patch`
+
+Generate a basic config
+`virtme-configkernel --defconfig`
+
+Configure Kernel-Isolation
+
+```
+scripts/config --enable SYSISO
+scripts/config --enable SYSISO_USERSPACE
+scripts/config --disable SYSISO_DEBUG
+scripts/config --disable SYSISO_DEBUG_FTRACE
+```
+
+Build the Quarantined kernel.
+```
+make -j `nproc`
+cd ..
+```
+
+# Test the Kernel-Isolation Prototype
+```
+cd linux-5.15
+./run_kernel.sh
+```
+
+The number of servers can be configured via `/sys/kernel/sysiso/servers`
 
 # Test the Virtualization-based Prototype
 
@@ -82,7 +113,7 @@ wget -P home https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/x86_64/alpine-
 
 Launch the quarantined kernel in a virtual machine.
 ```
-./run.sh
+./run_virt.sh
 ```
 In order to multiplex our terminal later on, let's start a `tmux` session.
 ```
@@ -117,7 +148,7 @@ new `tmux` window. Quarantine spawned three runner threads for the 3 vCPUs of
 the test VM.
 ```
 dmesg | tail
-``` 
+```
 Let's check that only those runners are running on guest CPUs, and all other
 tasks are running on the host CPU.
 ```
@@ -125,4 +156,4 @@ ps H -F
 ```
 The `PSR` column lists the CPU number that the task is running on.
 
-You can shut down the prototype (i.e. QEMU) using `CTRL+A CTRL+X`. 
+You can shut down the prototype (i.e. QEMU) using `CTRL+A CTRL+X`.
