@@ -18,11 +18,22 @@ Quarantine requires a processor with at least two physical cores. The
 virtualization-based prototype only supports AMD processors with AMD-V (i.e.
 SVM) support.
 
-# Dependencies
+# Testing Quarantine using Docker
+
+```
+docker pull manufactory0/quarantine:latest
+docker run --device=/dev/kvm  --name quarantine -t -i --rm manufactory0/quarantine:latest
+```
+
+# Building Quarantine manually
+
+Commands were tested on Ubuntu 22.04.
+
+## Dependencies
 
 Make sure you have the necessary dependencies installed.
 ```
-sudo apt-get install libncurses-dev gawk flex bison openssl libssl-dev dkms libelf-dev libudev-dev libpci-dev libiberty-dev autoconf llvm zstd qemu-system-x86 debootstrap wget unzip
+sudo apt install -y libncurses-dev gawk flex bison openssl libssl-dev dkms libelf-dev libudev-dev libpci-dev libiberty-dev autoconf bc llvm zstd qemu-system-x86 debootstrap wget git python3-setuptools tmux unzip
 ```
 
 We will use `virtme` to run the prototype in a virtualized environment.
@@ -31,7 +42,9 @@ git clone https://github.com/amluto/virtme.git
 cd virtme && sudo ./setup.py install && cd ..
 ```
 
-# Build the KVM Prototype
+## Build the KVM Prototype
+
+***Note that you applying `quarantine-kern.patch` and `quarantine-virt.patch` at the same source tree is not supported.***
 
 Acquire the Linux 5.15 source code.
 ```
@@ -68,9 +81,9 @@ cd ..
 You can now install the kernel on your machine to run it baremetal. For testing,
 it is easier to run it virtualized, which we will discuss next.
 
-# Build the Kernel-Isolation Prototype
+## Build the Kernel-Isolation Prototype
 
-***Note that you applying `quarantine-kern.patch` and `quarantine-virt.patch` at the same source tree is not supported***
+***Note that you applying `quarantine-kern.patch` and `quarantine-virt.patch` at the same source tree is not supported.***
 
 Acquire Linux 5.15 and `cd linux-5.15`
 
@@ -95,15 +108,16 @@ make -j `nproc`
 cd ..
 ```
 
-# Test the Kernel-Isolation Prototype
+# Running Quarantine
+
+## Run the Kernel-Isolation Prototype
 ```
-cd linux-5.15
-./run_kernel.sh
+./run_kern.sh
 ```
 
 The number of servers can be configured via `/sys/kernel/sysiso/servers`
 
-# Test the Virtualization-based Prototype
+## Run the Virtualization-based Prototype
 
 To try out the virtualization-based prototype, you will want a test virtual
 machine. Let's download an Alpine VM.
