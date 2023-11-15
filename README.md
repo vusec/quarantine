@@ -18,14 +18,80 @@ Quarantine requires a processor with at least two physical cores. The
 virtualization-based prototype only supports AMD processors with AMD-V (i.e.
 SVM) support.
 
-# Testing Quarantine using Docker
+# Test Quarantine using Docker
 
 ```
 docker pull manufactory0/quarantine:latest
 docker run --device=/dev/kvm  --name quarantine -t -i --rm manufactory0/quarantine:latest
 ```
 
-# Building Quarantine manually
+# Run Quarantine
+
+## Run the Kernel-Isolation Prototype
+```
+./run_kern.sh
+```
+
+The number of servers can be configured via `/sys/kernel/sysiso/servers`
+
+You can shut down the prototype (i.e. QEMU) using CTRL+A CTRL+X.
+
+## Run the Virtualization-based Prototype
+
+To try out the virtualization-based prototype, you will want a test virtual
+machine. Let's download an Alpine VM.
+```
+wget -P home https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/x86_64/alpine-virt-3.18.3-x86_64.iso
+```
+
+Launch the quarantined kernel in a virtual machine.
+```
+./run_virt.sh
+```
+In order to multiplex our terminal later on, let's start a `tmux` session.
+```
+tmux
+```
+
+Quarantine can be configured via `/sys/kernel/hypiso`, before any VMs have been
+started yet.
+```
+echo 3 > /sys/kernel/hypiso/nr_guest_cpus
+cat /sys/kernel/hypiso/core_config
+```
+This should show core 0 as the only host core and cores 1-3 as the guest cores.
+Upon boot, Quarantine's physical domain isolation is turned off.
+```
+cat /sys/kernel/hypiso/hypiso_on
+```
+The same file allows you to turn it on.
+```
+echo 1 > /sys/kernel/hypiso/hypiso_on
+cat /sys/kernel/hypiso/hypiso_on
+```
+
+Let's now launch a (nested) test virtual machine with 3 vCPUs and 2GB of memory.
+```
+qemu-system-x86_64 --smp 3 -m 2G -boot d -cdrom alpine-virt-3.18.3-x86_64.iso -enable-kvm -nographic
+```
+You can login using "root". This should give you a functioning Alpine VM.
+
+Switch back to the host (Quarantine) kernel using `CTRL+B CTRL+C`, creating a
+new `tmux` window. Quarantine spawned three runner threads for the 3 vCPUs of
+the test VM.
+```
+dmesg | tail
+```
+Let's check that only those runners are running on guest CPUs, and all other
+tasks are running on the host CPU.
+```
+ps H -F
+```
+The `PSR` column lists the CPU number that the task is running on.
+
+You can shut down the prototype (i.e. QEMU) using `CTRL+A CTRL+X`.
+
+# Build Quarantine manually
 
 Commands were tested on Ubuntu 22.04.
 
@@ -107,67 +173,3 @@ Build the Quarantined kernel.
 make -j `nproc`
 cd ..
 ```
-
-# Running Quarantine
-
-## Run the Kernel-Isolation Prototype
-```
-./run_kern.sh
-```
-
-The number of servers can be configured via `/sys/kernel/sysiso/servers`
-
-## Run the Virtualization-based Prototype
-
-To try out the virtualization-based prototype, you will want a test virtual
-machine. Let's download an Alpine VM.
-```
-wget -P home https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/x86_64/alpine-virt-3.18.3-x86_64.iso
-```
-
-Launch the quarantined kernel in a virtual machine.
-```
-./run_virt.sh
-```
-In order to multiplex our terminal later on, let's start a `tmux` session.
-```
-tmux
-```
-
-Quarantine can be configured via `/sys/kernel/hypiso`, before any VMs have been
-started yet.
-```
-echo 3 > /sys/kernel/hypiso/nr_guest_cpus
-cat /sys/kernel/hypiso/core_config
-```
-This should show core 0 as the only host core and cores 1-3 as the guest cores.
-Upon boot, Quarantine's physical domain isolation is turned off.
-```
-cat /sys/kernel/hypiso/hypiso_on
-```
-The same file allows you to turn it on.
-```
-echo 1 > /sys/kernel/hypiso/hypiso_on
-cat /sys/kernel/hypiso/hypiso_on
-```
-
-Let's now launch a (nested) test virtual machine with 3 vCPUs and 2GB of memory.
-```
-qemu-system-x86_64 --smp 3 -m 2G -boot d -cdrom alpine-virt-3.18.3-x86_64.iso -enable-kvm -nographic
-```
-You can login using "root". This should give you a functioning Alpine VM.
-
-Switch back to the host (Quarantine) kernel using `CTRL+B CTRL+C`, creating a
-new `tmux` window. Quarantine spawned three runner threads for the 3 vCPUs of
-the test VM.
-```
-dmesg | tail
-```
-Let's check that only those runners are running on guest CPUs, and all other
-tasks are running on the host CPU.
-```
-ps H -F
-```
-The `PSR` column lists the CPU number that the task is running on.
-
-You can shut down the prototype (i.e. QEMU) using `CTRL+A CTRL+X`.
