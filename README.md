@@ -22,7 +22,7 @@ SVM) support.
 
 ```
 docker pull manufactory0/quarantine:latest
-docker run --device=/dev/kvm  --name quarantine -t -i --rm manufactory0/quarantine:latest
+docker run -u root --device=/dev/kvm  --name quarantine -t -i --rm manufactory0/quarantine:latest
 ```
 
 # Run Quarantine
