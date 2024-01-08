@@ -18,23 +18,28 @@ Quarantine requires a processor with at least two physical cores. The
 virtualization-based prototype only supports AMD processors with AMD-V (i.e.
 SVM) support.
 
-# Test Quarantine using Docker
+# Get Quarantine using Docker
 
+You can get the Quarantine prototypes directly via Docker as follows.
 ```
 docker pull manufactory0/quarantine:latest
 docker run -u root --device=/dev/kvm  --name quarantine -t -i --rm manufactory0/quarantine:latest
 ```
+This launches a Docker container storing the prebuilt prototypes.
+To build the prototypes yourself, see [below](#build-quarantine-manually).
 
 # Run Quarantine
 
-## Run the Kernel-Isolation Prototype
+## Run the Kernel-based Prototype
+
+Launch a virtual machine that runs the Quarantined kernel.
 ```
 ./run_kern.sh
 ```
 
-The number of servers can be configured via `/sys/kernel/sysiso/servers`
+The number of servers can be configured via `/sys/kernel/sysiso/servers`.
 
-You can shut down the prototype (i.e. QEMU) using CTRL+A CTRL+X.
+You can shut down the prototype (i.e. QEMU) using `CTRL+A CTRL+X`.
 
 ## Run the Virtualization-based Prototype
 
@@ -91,7 +96,7 @@ The `PSR` column lists the CPU number that the task is running on.
 
 You can shut down the prototype (i.e. QEMU) using `CTRL+A CTRL+X`.
 
-# Build Quarantine manually
+# Build Quarantine Manually
 
 Commands were tested on Ubuntu 22.04.
 
@@ -108,9 +113,7 @@ git clone https://github.com/amluto/virtme.git
 cd virtme && sudo ./setup.py install && cd ..
 ```
 
-## Build the KVM Prototype
-
-***Note that you applying `quarantine-kern.patch` and `quarantine-virt.patch` at the same source tree is not supported.***
+## Source Code
 
 Acquire the Linux 5.15 source code.
 ```
@@ -124,19 +127,30 @@ Now choose to either apply the patch for the kernel-based prototype
 ```
 git apply ../quarantine-kern.patch
 ```
-or the one for the virtualization-based prototype.
+or (not both!) the one for the virtualization-based prototype.
 ```
 git apply ../quarantine-virt.patch
 ```
+
+## Configuration
 
 Configure the kernel. We use the default config provided by `virtme`.
 ```
 virtme-configkernel --defconfig
 ```
-Make sure Quarantine is enabled.
+Make sure Quarantine is enabled. For the kernel-based prototype, use:
+```
+scripts/config --enable SYSISO
+scripts/config --enable SYSISO_USERSPACE
+scripts/config --disable SYSISO_DEBUG
+scripts/config --disable SYSISO_DEBUG_FTRACE
+```
+On the other hand, for the virtualization-based prototype, use:
 ```
 scripts/config --enable HYPISO
 ```
+
+## Build
 
 Build the Quarantined kernel.
 ```
@@ -145,31 +159,5 @@ cd ..
 ```
 
 You can now install the kernel on your machine to run it baremetal. For testing,
-it is easier to run it virtualized, which we will discuss next.
-
-## Build the Kernel-Isolation Prototype
-
-***Note that you applying `quarantine-kern.patch` and `quarantine-virt.patch` at the same source tree is not supported.***
-
-Acquire Linux 5.15 and `cd linux-5.15`
-
-Apply the patch
-`patch patch -p1 < ../quarantine-kern.patch`
-
-Generate a basic config
-`virtme-configkernel --defconfig`
-
-Configure Kernel-Isolation
-
-```
-scripts/config --enable SYSISO
-scripts/config --enable SYSISO_USERSPACE
-scripts/config --disable SYSISO_DEBUG
-scripts/config --disable SYSISO_DEBUG_FTRACE
-```
-
-Build the Quarantined kernel.
-```
-make -j `nproc`
-cd ..
-```
+it is easier to run it virtualized, using the `run_kern.sh` and `run_virt.sh`
+scripts respectively.
