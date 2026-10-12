@@ -4,6 +4,10 @@ Quarantine: Mitigating Transient Execution Attacks with Physical Domain Isolatio
 This repository contains the Quarantine prototypes as described in our
 [RAID '23 paper](https://download.vusec.net/papers/quarantine_raid23.pdf).
 
+To see the exact same prototype as used during the paper's evaluation,
+checkout the `prototype-raid23` branch. For the latest prototype,
+refer to this branch, `main`.
+
 The files [quarantine-kern.patch](quarantine-kern.patch) and
 [quarantine-virt.patch](quarantine-virt.patch) contain the kernel patches,
 relative to Linux 5.15, implementing the kernel-based and virtualization-based
